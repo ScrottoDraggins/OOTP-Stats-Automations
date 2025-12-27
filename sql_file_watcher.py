@@ -8,11 +8,13 @@ detect new folders and process SQL files within them.
 """
 
 import os
+import sys
 import time
 import logging
 import mysql.connector
 from pathlib import Path
 from typing import Optional
+from dotenv import load_dotenv
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler, DirCreatedEvent
 
@@ -117,6 +119,108 @@ class SQLFileWatcher:
             logger.error(f"Failed to ensure database connection: {e}")
             raise
     
+    def _split_sql_statements(self, sql_content: str) -> list:
+        """
+        Split SQL content into individual statements.
+        Handles semicolons within string literals and comments.
+        
+        Args:
+            sql_content: The SQL content to split
+            
+        Returns:
+            List of SQL statements
+        """
+        statements = []
+        current_statement = []
+        in_single_quote = False
+        in_double_quote = False
+        in_backtick = False
+        in_single_line_comment = False
+        in_multi_line_comment = False
+        
+        lines = sql_content.split('\n')
+        
+        for line in lines:
+            i = 0
+            while i < len(line):
+                char = line[i]
+                
+                # Handle single-line comments
+                if not in_single_quote and not in_double_quote and not in_backtick and not in_multi_line_comment:
+                    if i < len(line) - 1 and line[i:i+2] == '--':
+                        in_single_line_comment = True
+                        current_statement.append(line[i:])
+                        break
+                
+                # Handle multi-line comment start
+                if not in_single_quote and not in_double_quote and not in_backtick and not in_single_line_comment:
+                    if i < len(line) - 1 and line[i:i+2] == '/*':
+                        in_multi_line_comment = True
+                        current_statement.append(char)
+                        i += 1
+                        current_statement.append(line[i])
+                        i += 1
+                        continue
+                
+                # Handle multi-line comment end
+                if in_multi_line_comment:
+                    current_statement.append(char)
+                    if i < len(line) - 1 and line[i:i+2] == '*/':
+                        in_multi_line_comment = False
+                        i += 1
+                        current_statement.append(line[i])
+                    i += 1
+                    continue
+                
+                # Skip if in single-line comment
+                if in_single_line_comment:
+                    current_statement.append(char)
+                    i += 1
+                    continue
+                
+                # Handle string delimiters
+                if char == "'" and not in_double_quote and not in_backtick:
+                    # Check for escaped quote
+                    if i > 0 and line[i-1] == '\\':
+                        current_statement.append(char)
+                    else:
+                        in_single_quote = not in_single_quote
+                        current_statement.append(char)
+                elif char == '"' and not in_single_quote and not in_backtick:
+                    if i > 0 and line[i-1] == '\\':
+                        current_statement.append(char)
+                    else:
+                        in_double_quote = not in_double_quote
+                        current_statement.append(char)
+                elif char == '`' and not in_single_quote and not in_double_quote:
+                    in_backtick = not in_backtick
+                    current_statement.append(char)
+                # Handle semicolon (statement terminator)
+                elif char == ';' and not in_single_quote and not in_double_quote and not in_backtick:
+                    # End of statement
+                    stmt = ''.join(current_statement).strip()
+                    if stmt:
+                        statements.append(stmt)
+                    current_statement = []
+                else:
+                    current_statement.append(char)
+                
+                i += 1
+            
+            # Reset single-line comment flag at end of line
+            if in_single_line_comment:
+                in_single_line_comment = False
+            
+            # Add newline if not at end of content
+            current_statement.append('\n')
+        
+        # Add any remaining statement
+        stmt = ''.join(current_statement).strip()
+        if stmt:
+            statements.append(stmt)
+        
+        return statements
+    
     def _execute_sql_file(self, sql_file_path: str) -> None:
         """
         Execute SQL commands from a file.
@@ -132,9 +236,8 @@ class SQLFileWatcher:
             with open(sql_file_path, 'r', encoding='utf-8') as file:
                 sql_content = file.read()
             
-            # Split by semicolons to handle multiple statements
-            # Note: This is a simple split and may not handle all edge cases
-            statements = [stmt.strip() for stmt in sql_content.split(';') if stmt.strip()]
+            # Parse SQL statements properly handling strings and comments
+            statements = self._split_sql_statements(sql_content)
             
             cursor = self.connection.cursor()
             
@@ -268,9 +371,6 @@ def main():
     Main entry point for the SQL File Watcher service.
     Loads configuration from environment variables.
     """
-    import sys
-    from dotenv import load_dotenv
-    
     # Load environment variables from .env file if present
     load_dotenv()
     
@@ -280,7 +380,7 @@ def main():
     password = os.getenv('DB_PASSWORD')
     database = os.getenv('DB_NAME')
     watch_path = os.getenv('WATCH_PATH')
-    port = int(os.getenv('DB_PORT', '3306'))
+    port_str = os.getenv('DB_PORT', '3306')
     ssl_ca = os.getenv('DB_SSL_CA')
     ssl_disabled = os.getenv('DB_SSL_DISABLED', 'false').lower() == 'true'
     
@@ -297,6 +397,13 @@ def main():
     if missing_vars:
         logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
         logger.error("Please set these variables in a .env file or as environment variables")
+        sys.exit(1)
+    
+    # Parse port with error handling
+    try:
+        port = int(port_str)
+    except ValueError:
+        logger.error(f"Invalid DB_PORT value: '{port_str}'. Must be a valid integer.")
         sys.exit(1)
     
     # Create and start watcher
