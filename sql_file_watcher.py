@@ -271,11 +271,24 @@ class SQLFileWatcher:
         logger.info(f"Processing folder: {folder_path}")
         
         try:
-            # Find all .sql files in the folder
-            sql_files = sorted(Path(folder_path).glob('*.sql'))
+            # Wait for files to be written (OOTP creates folder before writing files)
+            max_wait = 30  # Wait up to 30 seconds
+            wait_interval = 2  # Check every 2 seconds
+            elapsed = 0
+            
+            while elapsed < max_wait:
+                # Find all .sql files in the folder (recursively)
+                sql_files = sorted(Path(folder_path).glob('**/*.sql'))
+                
+                if sql_files:
+                    break
+                
+                logger.info(f"Waiting for SQL files to appear in {folder_path}... ({elapsed}s)")
+                time.sleep(wait_interval)
+                elapsed += wait_interval
             
             if not sql_files:
-                logger.warning(f"No SQL files found in folder: {folder_path}")
+                logger.warning(f"No SQL files found in folder after {max_wait}s: {folder_path}")
                 return
             
             logger.info(f"Found {len(sql_files)} SQL file(s) in {folder_path}")
@@ -375,22 +388,22 @@ def main():
     load_dotenv()
     
     # Get configuration from environment variables
-    host = os.getenv('DB_HOST')
-    user = os.getenv('DB_USER')
-    password = os.getenv('DB_PASSWORD')
-    database = os.getenv('DB_NAME')
-    watch_path = os.getenv('WATCH_PATH')
-    port_str = os.getenv('DB_PORT', '3306')
-    ssl_ca = os.getenv('DB_SSL_CA')
-    ssl_disabled = os.getenv('DB_SSL_DISABLED', 'false').lower() == 'true'
+    host = os.getenv('OOTP_DB_HOST')
+    user = os.getenv('OOTP_DB_USER')
+    password = os.getenv('OOTP_DB_PASSWORD')
+    database = os.getenv('OOTP_DB_NAME')
+    watch_path = os.getenv('OOTP_WATCH_PATH')
+    port_str = os.getenv('OOTP_DB_PORT', '3306')
+    ssl_ca = os.getenv('OOTP_DB_SSL_CA')
+    ssl_disabled = os.getenv('OOTP_DB_SSL_DISABLED', 'false').lower() == 'true'
     
     # Validate required configuration
     required_vars = {
-        'DB_HOST': host,
-        'DB_USER': user,
-        'DB_PASSWORD': password,
-        'DB_NAME': database,
-        'WATCH_PATH': watch_path
+        'OOTP_DB_HOST': host,
+        'OOTP_DB_USER': user,
+        'OOTP_DB_PASSWORD': password,
+        'OOTP_DB_NAME': database,
+        'OOTP_WATCH_PATH': watch_path
     }
     
     missing_vars = [var for var, value in required_vars.items() if not value]
@@ -403,7 +416,7 @@ def main():
     try:
         port = int(port_str)
     except ValueError:
-        logger.error(f"Invalid DB_PORT value: '{port_str}'. Must be a valid integer.")
+        logger.error(f"Invalid OOTP_DB_PORT value: '{port_str}'. Must be a valid integer.")
         sys.exit(1)
     
     # Create and start watcher
